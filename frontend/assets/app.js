@@ -1,4 +1,4 @@
-// ===== Meridian ProFX — app logic (mock mode) =====
+// ===== Meridian ProFX — app logic =====
 
 const state = {
   symbols: JSON.parse(JSON.stringify(MOCK_SYMBOLS)),
@@ -6,6 +6,7 @@ const state = {
   history: MOCK_HISTORY,
   activeTradeSymbol: "EUR/USD",
   orderType: "MARKET",
+  timeframe: "M1",
 };
 
 const fmt = (n, dp = 5) => Number(n).toFixed(dp);
@@ -13,6 +14,10 @@ const fmtMoney = (n) => (n >= 0 ? "+" : "") + Number(n).toFixed(2);
 
 function getSymbol(name) {
   return state.symbols.find((s) => s.symbol === name);
+}
+
+function decimalsFor(symbol) {
+  return symbol.includes("JPY") ? 3 : 5;
 }
 
 // ---------- Tabs ----------
@@ -47,10 +52,6 @@ function renderTicker() {
       </div>`
     )
     .join("");
-}
-
-function decimalsFor(symbol) {
-  return symbol.includes("JPY") ? 3 : 5;
 }
 
 function flashPrice(el, direction) {
@@ -239,7 +240,7 @@ function setTradeSymbol(symbolName) {
   document.getElementById("ticket-symbol").value = symbolName;
   document.getElementById("trade-symbol-title").textContent = symbolName;
   updateTicketPrices();
-  renderMockChart(symbolName);
+  refreshChart();
 }
 
 function updateTicketPrices() {
@@ -260,6 +261,19 @@ function initOrderTypeSegmented() {
       btn.classList.add("active");
       state.orderType = btn.dataset.value;
       entryRow.style.display = state.orderType === "MARKET" ? "none" : "block";
+    });
+  });
+}
+
+function initTimeframeSegmented() {
+  const seg = document.getElementById("timeframe-segmented");
+  if (!seg) return;
+  seg.querySelectorAll(".seg").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      seg.querySelectorAll(".seg").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.timeframe = btn.dataset.tf;
+      refreshChart();
     });
   });
 }
@@ -302,7 +316,7 @@ function submitOrder(side) {
   }, 3000);
 }
 
-// ---------- Mock chart ----------
+// ---------- Chart: mock (random walk) fallback ----------
 
 let chartHistory = {};
 
@@ -334,21 +348,132 @@ function renderMockChart(symbolName) {
   const lastUp = points[points.length - 1] >= points[0];
   const stroke = lastUp ? "#1FBF83" : "#F0554A";
 
-  svg.innerHTML = `
-    <polyline points="${coords.join(" ")}" fill="none" stroke="${stroke}" stroke-width="2" />
-  `;
+  svg.setAttribute("viewBox", "0 0 600 200");
+  svg.innerHTML = `<polyline points="${coords.join(" ")}" fill="none" stroke="${stroke}" stroke-width="2" />`;
 }
 
 function pushChartTick(symbolName, newPrice) {
   if (!chartHistory[symbolName]) return;
   chartHistory[symbolName].push(newPrice);
   chartHistory[symbolName].shift();
-  if (state.activeTradeSymbol === symbolName) renderMockChart(symbolName);
+  if (state.activeTradeSymbol === symbolName && !window.realAccountId) renderMockChart(symbolName);
 }
 
-// ---------- Mock live price engine ----------
+// ---------- Chart: real candlesticks ----------
+
+async function renderRealCandles(symbolName, timeframe) {
+  const svg = document.getElementById("chart-svg");
+  try {
+    const res = await fetch(
+      `/api/trendbars?accountId=${window.realAccountId}&symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`,
+      { credentials: "include" }
+    );
+    if (!res.ok) throw new Error("Trendbars request failed: " + res.status);
+    const data = await res.json();
+    const bars = data.trendbar || [];
+    if (!bars.length) {
+      svg.innerHTML = `<text x="20" y="100" fill="#7C8494" font-size="13">No candle data yet for ${symbolName} (${timeframe}).</text>`;
+      return;
+    }
+
+    // cTrader raw trendbar scaling: low is absolute (needs /100000 for most FX,
+    // /1000 for JPY pairs); deltaOpen/deltaHigh/deltaClose are offsets from low.
+    const divisor = symbolName.includes("JPY") ? 1000 : 100000;
+    const candles = bars.map((b) => {
+      const low = b.low / divisor;
+      const open = low + b.deltaOpen / divisor;
+      const high = low + b.deltaHigh / divisor;
+      const close = low + b.deltaClose / divisor;
+      return { open, high, low, close };
+    });
+
+    const allValues = candles.flatMap((c) => [c.high, c.low]);
+    const min = Math.min(...allValues);
+    const max = Math.max(...allValues);
+    const range = max - min || 1;
+
+    const w = 600, h = 200, pad = 10;
+    const candleWidth = Math.max(2, (w - pad * 2) / candles.length - 2);
+
+    const priceToY = (p) => h - pad - ((p - min) / range) * (h - pad * 2);
+
+    let svgContent = "";
+    candles.forEach((c, i) => {
+      const x = pad + (i / candles.length) * (w - pad * 2);
+      const isUp = c.close >= c.open;
+      const color = isUp ? "#1FBF83" : "#F0554A";
+      const yHigh = priceToY(c.high);
+      const yLow = priceToY(c.low);
+      const yOpen = priceToY(c.open);
+      const yClose = priceToY(c.close);
+      const bodyTop = Math.min(yOpen, yClose);
+      const bodyHeight = Math.max(1, Math.abs(yClose - yOpen));
+
+      svgContent += `<line x1="${x + candleWidth / 2}" y1="${yHigh}" x2="${x + candleWidth / 2}" y2="${yLow}" stroke="${color}" stroke-width="1" />`;
+      svgContent += `<rect x="${x}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" />`;
+    });
+
+    svg.setAttribute("viewBox", "0 0 600 200");
+    svg.innerHTML = svgContent;
+  } catch (err) {
+    console.error("renderRealCandles error:", err);
+    svg.innerHTML = `<text x="20" y="100" fill="#F0554A" font-size="13">Chart error: ${err.message}</text>`;
+  }
+}
+
+function refreshChart() {
+  if (window.realAccountId) {
+    renderRealCandles(state.activeTradeSymbol, state.timeframe);
+  } else {
+    renderMockChart(state.activeTradeSymbol);
+  }
+}
+
+// ---------- Live price polling (once a real account is connected) ----------
+
+async function pollLivePrices() {
+  if (!window.realAccountId) return;
+  try {
+    const res = await fetch(`/api/live-prices?accountId=${window.realAccountId}`, { credentials: "include" });
+    if (!res.ok) return;
+    const data = await res.json();
+    const prices = data.prices || {};
+
+    Object.entries(prices).forEach(([rawName, spot]) => {
+      // backend stores names without slash (EURUSD); our UI uses EUR/USD
+      const displayName = rawName.length === 6 ? `${rawName.slice(0, 3)}/${rawName.slice(3)}` : rawName;
+      const sym = getSymbol(displayName);
+      if (!sym) return;
+      const dp = decimalsFor(displayName);
+      const divisor = displayName.includes("JPY") ? 1000 : 100000;
+      const prevBid = sym.bid;
+      sym.bid = Number((spot.bid / divisor).toFixed(dp));
+      sym.ask = Number((spot.ask / divisor).toFixed(dp));
+
+      const tickerEl = document.querySelector(`.ticker-item[data-symbol="${displayName}"] .px`);
+      if (tickerEl) {
+        tickerEl.textContent = fmt(sym.bid, dp);
+        flashPrice(tickerEl, sym.bid >= prevBid ? "up" : "down");
+      }
+    });
+
+    renderWatchlist();
+    renderMarkets(document.getElementById("market-search").value);
+    updateTicketPrices();
+    renderPositions();
+  } catch (err) {
+    console.error("pollLivePrices error:", err);
+  }
+}
+
+// ---------- Mock price engine (used until a real account connects) ----------
 
 function tickPrices() {
+  if (window.realAccountId) {
+    pollLivePrices();
+    return;
+  }
+
   state.symbols.forEach((s) => {
     const dp = decimalsFor(s.symbol);
     const pipSize = dp === 3 ? 0.001 : 0.00001;
@@ -385,6 +510,7 @@ function init() {
   renderHistory();
   populateTicketSymbols();
   initOrderTypeSegmented();
+  initTimeframeSegmented();
   initOrderButtons();
   setTradeSymbol(state.activeTradeSymbol);
 
@@ -392,7 +518,7 @@ function init() {
     renderMarkets(e.target.value);
   });
 
-  setInterval(tickPrices, 1800);
+  setInterval(tickPrices, 2000);
 }
 
 document.addEventListener("DOMContentLoaded", init);
