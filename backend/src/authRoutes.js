@@ -1,6 +1,5 @@
 const express = require("express");
 const crypto = require("crypto");
-const { CTraderConnection } = require("@reiryoku/ctrader-layer");
 const ctraderClient = require("./ctraderClient");
 
 const router = express.Router();
@@ -43,7 +42,16 @@ router.get("/auth/callback", async (req, res) => {
       return res.status(400).json(tokenData);
     }
 
-    const accounts = await CTraderConnection.getAccessTokenAccounts(tokenData.access_token);
+    console.log("Got access token, fetching linked accounts...");
+
+    // Use our existing live connection instead of the library's static helper
+    const connection = await ctraderClient.connect();
+    const accountsResponse = await connection.sendCommand("ProtoOAGetAccountListByAccessTokenReq", {
+      accessToken: tokenData.access_token,
+    });
+
+    const accounts = accountsResponse.ctidTraderAccount || [];
+    console.log("Found accounts:", accounts.length);
 
     const sessionId = crypto.randomUUID();
     userSessions.set(sessionId, {
@@ -55,8 +63,8 @@ router.get("/auth/callback", async (req, res) => {
     res.cookie("session_id", sessionId, { httpOnly: true, sameSite: "lax" });
     res.redirect("/index.html?connected=1");
   } catch (err) {
-    console.error(err);
-    res.status(500).send("OAuth callback failed");
+    console.error("OAuth callback error:", err);
+    res.status(500).send("OAuth callback failed: " + err.message);
   }
 });
 
