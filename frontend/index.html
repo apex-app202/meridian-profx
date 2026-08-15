@@ -264,7 +264,9 @@
         });
 
         if (!res.ok) {
-          note.textContent = "Failed to connect this account.";
+          const errData = await res.json().catch(() => ({}));
+          note.textContent = "Failed: " + (errData.error || res.status);
+          console.error("select-account failed:", res.status, errData);
           return;
         }
 
@@ -278,6 +280,7 @@
         note.textContent = `Connected to account ${account.traderLogin} (${account.isLive ? "LIVE" : "Demo"}).`;
       } catch (err) {
         note.textContent = "Error: " + err.message;
+        console.error(err);
       }
     });
 

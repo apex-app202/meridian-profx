@@ -44,7 +44,6 @@ router.get("/auth/callback", async (req, res) => {
 
     console.log("Got access token, fetching linked accounts...");
 
-    // Use our existing live connection instead of the library's static helper
     const connection = await ctraderClient.connect();
     const accountsResponse = await connection.sendCommand("ProtoOAGetAccountListByAccessTokenReq", {
       accessToken: tokenData.access_token,
@@ -71,13 +70,21 @@ router.get("/auth/callback", async (req, res) => {
 router.post("/auth/select-account", async (req, res) => {
   const sessionId = req.cookies.session_id;
   const session = userSessions.get(sessionId);
-  if (!session) return res.status(401).json({ error: "Not logged in" });
+  if (!session) {
+    console.log("select-account: no session found for cookie", sessionId);
+    return res.status(401).json({ error: "Not logged in" });
+  }
 
   const { ctidTraderAccountId } = req.body;
+  console.log("select-account: attempting to authorize account", ctidTraderAccountId);
+
   try {
     await ctraderClient.authorizeAccount(ctidTraderAccountId, session.accessToken);
+    console.log("select-account: success for account", ctidTraderAccountId);
     res.json({ ok: true, ctidTraderAccountId });
   } catch (err) {
+    console.error("select-account: FAILED for account", ctidTraderAccountId, "-", err.message);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
