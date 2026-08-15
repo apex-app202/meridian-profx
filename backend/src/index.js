@@ -11,7 +11,6 @@ app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
-// Serve the frontend directly from this same server
 const frontendPath = path.join(__dirname, "../../frontend");
 console.log("Looking for frontend at:", frontendPath);
 app.use(express.static(frontendPath));
@@ -49,6 +48,17 @@ app.get("/api/symbols", async (req, res) => {
   if (!session) return res.status(401).json({ error: "Not logged in" });
   try {
     const data = await ctraderClient.getSymbols(req.query.accountId);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/trader", async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: "Not logged in" });
+  try {
+    const data = await ctraderClient.getTrader(req.query.accountId);
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
