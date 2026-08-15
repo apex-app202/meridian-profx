@@ -12,7 +12,6 @@
 
   <div class="app">
 
-    <!-- Top bar: brand + tabs, left to right -->
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark">◆</span>
@@ -32,10 +31,8 @@
       </div>
     </header>
 
-    <!-- Ticker strip -->
     <div class="ticker" id="ticker"></div>
 
-    <!-- Panels -->
     <main class="content">
 
       <section class="panel active" id="panel-dashboard">
@@ -215,7 +212,15 @@
         </div>
         <div class="card">
           <div class="card-header"><h3>Connection</h3></div>
-          <p class="empty-state">Your cTrader credentials haven't been connected yet. Once wired up, this tab will show your real account login, balance, and let you switch between accounts.</p>
+          <p class="empty-state" id="connection-empty">Your cTrader credentials haven't been connected yet.</p>
+
+          <div id="connection-connected" style="display:none; padding: 0 16px 16px;">
+            <label class="field-label" style="padding:0; margin: 12px 0 6px;">Select account to trade</label>
+            <select class="field-select" id="real-account-select" style="margin:0; width:100%;"></select>
+            <button class="btn-connect" id="btn-use-account" style="cursor:pointer; opacity:1; margin: 12px 0 0;">Use this account</button>
+            <p class="ticket-note" id="account-status-note" style="padding-left:0;"></p>
+          </div>
+
           <button class="btn-connect" id="btn-connect-ctrader" style="cursor:pointer; opacity:1;">Connect cTrader Account</button>
         </div>
       </section>
@@ -226,21 +231,68 @@
   <script src="assets/mock-data.js"></script>
   <script src="assets/app.js"></script>
   <script>
-  document.getElementById("btn-connect-ctrader").addEventListener("click", () => {
-    window.location.href = "/auth/login";
-  });
+    let realAccounts = [];
 
-  // If we just came back from a successful login, confirm it
-  if (window.location.search.includes("connected=1")) {
-    fetch("/auth/session", { credentials: "include" })
-      .then(r => r.json())
-      .then(data => {
-        if (data.accounts) {
-          alert("Connected! Found " + data.accounts.length + " trading account(s). Check the browser console for details.");
-          console.log("Your cTrader accounts:", data.accounts);
+    document.getElementById("btn-connect-ctrader").addEventListener("click", () => {
+      window.location.href = "/auth/login";
+    });
+
+    function renderAccountOptions() {
+      const select = document.getElementById("real-account-select");
+      select.innerHTML = realAccounts
+        .map(a => `<option value="${a.ctidTraderAccountId}">${a.traderLogin} — ${a.isLive ? "LIVE" : "Demo"}</option>`)
+        .join("");
+    }
+
+    function showConnected() {
+      document.getElementById("connection-empty").style.display = "none";
+      document.getElementById("btn-connect-ctrader").style.display = "none";
+      document.getElementById("connection-connected").style.display = "block";
+    }
+
+    document.getElementById("btn-use-account").addEventListener("click", async () => {
+      const accountId = document.getElementById("real-account-select").value;
+      const note = document.getElementById("account-status-note");
+      note.textContent = "Connecting to this account...";
+
+      try {
+        const res = await fetch("/auth/select-account", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ctidTraderAccountId: Number(accountId) }),
+        });
+
+        if (!res.ok) {
+          note.textContent = "Failed to connect this account.";
+          return;
         }
-      });
-  }
-</script>
+
+        const traderRes = await fetch(`/api/trader?accountId=${accountId}`, { credentials: "include" });
+        const traderData = await traderRes.json();
+
+        const account = realAccounts.find(a => String(a.ctidTraderAccountId) === String(accountId));
+        const loginStat = document.querySelector("#panel-account .stat-value");
+        if (loginStat) loginStat.textContent = account.traderLogin;
+
+        note.textContent = `Connected to account ${account.traderLogin} (${account.isLive ? "LIVE" : "Demo"}).`;
+      } catch (err) {
+        note.textContent = "Error: " + err.message;
+      }
+    });
+
+    if (window.location.search.includes("connected=1")) {
+      fetch("/auth/session", { credentials: "include" })
+        .then(r => r.json())
+        .then(data => {
+          if (data.accounts) {
+            realAccounts = data.accounts;
+            renderAccountOptions();
+            showConnected();
+          }
+        })
+        .catch(err => console.error("Session check failed:", err));
+    }
+  </script>
 </body>
 </html>
