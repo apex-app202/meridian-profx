@@ -81,10 +81,14 @@ router.post("/auth/select-account", async (req, res) => {
   try {
     await ctraderClient.authorizeAccount(ctidTraderAccountId, session.accessToken);
     console.log("select-account: success for account", ctidTraderAccountId);
+
+    ctraderClient.subscribeToWatchlist(ctidTraderAccountId).catch((err) => {
+      console.error("subscribeToWatchlist failed:", err.message);
+    });
+
     res.json({ ok: true, ctidTraderAccountId });
   } catch (err) {
     console.error("select-account: FAILED for account", ctidTraderAccountId, "-", err.message);
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });

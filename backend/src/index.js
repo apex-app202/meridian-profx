@@ -65,6 +65,31 @@ app.get("/api/trader", async (req, res) => {
   }
 });
 
+app.get("/api/live-prices", (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: "Not logged in" });
+  try {
+    const prices = ctraderClient.getLivePrices(req.query.accountId);
+    res.json({ prices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/trendbars", async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: "Not logged in" });
+  try {
+    const { accountId, symbol, period } = req.query;
+    const symbolId = await ctraderClient.getSymbolIdByName(accountId, symbol);
+    if (!symbolId) return res.status(404).json({ error: "Symbol not found: " + symbol });
+    const data = await ctraderClient.getTrendbars(accountId, symbolId, period || "M1", 100);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 4000;
