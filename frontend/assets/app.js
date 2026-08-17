@@ -9,6 +9,10 @@ const state = {
   timeframe: "M1",
 };
 
+const CANDLE_WIDTH = 10;
+const CANDLE_GAP = 4;
+const CHART_HEIGHT = 320;
+
 const fmt = (n, dp = 5) => Number(n).toFixed(dp);
 const fmtMoney = (n) => (n >= 0 ? "+" : "") + Number(n).toFixed(2);
 
@@ -316,47 +320,88 @@ function submitOrder(side) {
   }, 3000);
 }
 
+// ---------- Chart: shared candle-drawing helper (used by mock + real) ----------
+
+function drawCandles(candles, isMock) {
+  const svg = document.getElementById("chart-svg");
+  const scrollBox = document.getElementById("chart-scroll");
+
+  if (!candles.length) {
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", CHART_HEIGHT);
+    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#7C8494" font-size="13">No chart data available.</text>`;
+    return;
+  }
+
+  const allValues = candles.flatMap((c) => [c.high, c.low]);
+  const min = Math.min(...allValues);
+  const max = Math.max(...allValues);
+  const range = max - min || 1;
+
+  const step = CANDLE_WIDTH + CANDLE_GAP;
+  const totalWidth = Math.max(candles.length * step + 20, 600);
+
+  svg.setAttribute("width", totalWidth);
+  svg.setAttribute("height", CHART_HEIGHT);
+
+  const pad = 12;
+  const priceToY = (p) => CHART_HEIGHT - pad - ((p - min) / range) * (CHART_HEIGHT - pad * 2);
+
+  let svgContent = "";
+  candles.forEach((c, i) => {
+    const x = 10 + i * step;
+    const isUp = c.close >= c.open;
+    const color = isUp ? "#1FBF83" : "#F0554A";
+    const yHigh = priceToY(c.high);
+    const yLow = priceToY(c.low);
+    const yOpen = priceToY(c.open);
+    const yClose = priceToY(c.close);
+    const bodyTop = Math.min(yOpen, yClose);
+    const bodyHeight = Math.max(1, Math.abs(yClose - yOpen));
+
+    svgContent += `<line x1="${x + CANDLE_WIDTH / 2}" y1="${yHigh}" x2="${x + CANDLE_WIDTH / 2}" y2="${yLow}" stroke="${color}" stroke-width="1" />`;
+    svgContent += `<rect x="${x}" y="${bodyTop}" width="${CANDLE_WIDTH}" height="${bodyHeight}" fill="${color}" />`;
+  });
+
+  svg.innerHTML = svgContent;
+
+  // auto-scroll to the most recent candle (right edge) on first render
+  if (scrollBox) {
+    scrollBox.scrollLeft = scrollBox.scrollWidth;
+  }
+}
+
 // ---------- Chart: mock (random walk) fallback ----------
 
 let chartHistory = {};
 
 function renderMockChart(symbolName) {
-  const svg = document.getElementById("chart-svg");
   if (!chartHistory[symbolName]) {
     const sym = getSymbol(symbolName);
     const points = [];
     let price = sym.bid;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
+      const open = price;
       price += (Math.random() - 0.5) * price * 0.0006;
-      points.push(price);
+      const close = price;
+      const high = Math.max(open, close) + Math.random() * price * 0.0002;
+      const low = Math.min(open, close) - Math.random() * price * 0.0002;
+      points.push({ open, high, low, close });
     }
     chartHistory[symbolName] = points;
   }
 
-  const points = chartHistory[symbolName];
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = max - min || 1;
-
-  const w = 600, h = 200, pad = 10;
-  const coords = points.map((p, i) => {
-    const x = pad + (i / (points.length - 1)) * (w - pad * 2);
-    const y = h - pad - ((p - min) / range) * (h - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-
-  const lastUp = points[points.length - 1] >= points[0];
-  const stroke = lastUp ? "#1FBF83" : "#F0554A";
-
-  svg.setAttribute("viewBox", "0 0 600 200");
-  svg.innerHTML = `<polyline points="${coords.join(" ")}" fill="none" stroke="${stroke}" stroke-width="2" />`;
+  drawCandles(chartHistory[symbolName], true);
 }
 
 function pushChartTick(symbolName, newPrice) {
   if (!chartHistory[symbolName]) return;
-  chartHistory[symbolName].push(newPrice);
-  chartHistory[symbolName].shift();
-  if (state.activeTradeSymbol === symbolName && !window.realAccountId) renderMockChart(symbolName);
+  const candles = chartHistory[symbolName];
+  const last = candles[candles.length - 1];
+  last.close = newPrice;
+  last.high = Math.max(last.high, newPrice);
+  last.low = Math.min(last.low, newPrice);
+  if (state.activeTradeSymbol === symbolName && !window.realAccountId) drawCandles(candles, true);
 }
 
 // ---------- Chart: real candlesticks ----------
@@ -372,12 +417,12 @@ async function renderRealCandles(symbolName, timeframe) {
     const data = await res.json();
     const bars = data.trendbar || [];
     if (!bars.length) {
-      svg.innerHTML = `<text x="20" y="100" fill="#7C8494" font-size="13">No candle data yet for ${symbolName} (${timeframe}).</text>`;
+      svg.setAttribute("width", "100%");
+      svg.setAttribute("height", CHART_HEIGHT);
+      svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#7C8494" font-size="13">No candle data yet for ${symbolName} (${timeframe}).</text>`;
       return;
     }
 
-    // cTrader raw trendbar scaling: low is absolute (needs /100000 for most FX,
-    // /1000 for JPY pairs); deltaOpen/deltaHigh/deltaClose are offsets from low.
     const divisor = symbolName.includes("JPY") ? 1000 : 100000;
     const candles = bars.map((b) => {
       const low = b.low / divisor;
@@ -387,37 +432,12 @@ async function renderRealCandles(symbolName, timeframe) {
       return { open, high, low, close };
     });
 
-    const allValues = candles.flatMap((c) => [c.high, c.low]);
-    const min = Math.min(...allValues);
-    const max = Math.max(...allValues);
-    const range = max - min || 1;
-
-    const w = 600, h = 200, pad = 10;
-    const candleWidth = Math.max(2, (w - pad * 2) / candles.length - 2);
-
-    const priceToY = (p) => h - pad - ((p - min) / range) * (h - pad * 2);
-
-    let svgContent = "";
-    candles.forEach((c, i) => {
-      const x = pad + (i / candles.length) * (w - pad * 2);
-      const isUp = c.close >= c.open;
-      const color = isUp ? "#1FBF83" : "#F0554A";
-      const yHigh = priceToY(c.high);
-      const yLow = priceToY(c.low);
-      const yOpen = priceToY(c.open);
-      const yClose = priceToY(c.close);
-      const bodyTop = Math.min(yOpen, yClose);
-      const bodyHeight = Math.max(1, Math.abs(yClose - yOpen));
-
-      svgContent += `<line x1="${x + candleWidth / 2}" y1="${yHigh}" x2="${x + candleWidth / 2}" y2="${yLow}" stroke="${color}" stroke-width="1" />`;
-      svgContent += `<rect x="${x}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${color}" />`;
-    });
-
-    svg.setAttribute("viewBox", "0 0 600 200");
-    svg.innerHTML = svgContent;
+    drawCandles(candles, false);
   } catch (err) {
     console.error("renderRealCandles error:", err);
-    svg.innerHTML = `<text x="20" y="100" fill="#F0554A" font-size="13">Chart error: ${err.message}</text>`;
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", CHART_HEIGHT);
+    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#F0554A" font-size="13">Chart error: ${err.message}</text>`;
   }
 }
 
@@ -439,9 +459,8 @@ async function pollLivePrices() {
     const data = await res.json();
     const prices = data.prices || {};
 
-    Object.entries(prices).forEach(([rawName, spot]) => {
-      // backend stores names without slash (EURUSD); our UI uses EUR/USD
-      const displayName = rawName.length === 6 ? `${rawName.slice(0, 3)}/${rawName.slice(3)}` : rawName;
+    Object.entries(prices).forEach(([code, spot]) => {
+      const displayName = code.length === 6 ? `${code.slice(0, 3)}/${code.slice(3)}` : code;
       const sym = getSymbol(displayName);
       if (!sym) return;
       const dp = decimalsFor(displayName);
