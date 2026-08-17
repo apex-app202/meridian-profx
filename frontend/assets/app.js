@@ -320,9 +320,9 @@ function submitOrder(side) {
   }, 3000);
 }
 
-// ---------- Chart: shared candle-drawing helper (used by mock + real) ----------
+// ---------- Chart: shared candle-drawing helper ----------
 
-function drawCandles(candles, isMock) {
+function drawCandles(candles) {
   const svg = document.getElementById("chart-svg");
   const scrollBox = document.getElementById("chart-scroll");
 
@@ -365,13 +365,12 @@ function drawCandles(candles, isMock) {
 
   svg.innerHTML = svgContent;
 
-  // auto-scroll to the most recent candle (right edge) on first render
   if (scrollBox) {
     scrollBox.scrollLeft = scrollBox.scrollWidth;
   }
 }
 
-// ---------- Chart: mock (random walk) fallback ----------
+// ---------- Chart: mock (random walk) — only used if the public feed itself fails ----------
 
 let chartHistory = {};
 
@@ -390,29 +389,19 @@ function renderMockChart(symbolName) {
     }
     chartHistory[symbolName] = points;
   }
-
-  drawCandles(chartHistory[symbolName], true);
+  drawCandles(chartHistory[symbolName]);
 }
 
-function pushChartTick(symbolName, newPrice) {
-  if (!chartHistory[symbolName]) return;
-  const candles = chartHistory[symbolName];
-  const last = candles[candles.length - 1];
-  last.close = newPrice;
-  last.high = Math.max(last.high, newPrice);
-  last.low = Math.min(last.low, newPrice);
-  if (state.activeTradeSymbol === symbolName && !window.realAccountId) drawCandles(candles, true);
-}
-
-// ---------- Chart: real candlesticks ----------
+// ---------- Chart: real candlesticks (public feed by default, or user's own account if connected) ----------
 
 async function renderRealCandles(symbolName, timeframe) {
   const svg = document.getElementById("chart-svg");
   try {
-    const res = await fetch(
-      `/api/trendbars?accountId=${window.realAccountId}&symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`,
-      { credentials: "include" }
-    );
+    const endpoint = window.realAccountId
+      ? `/api/trendbars?accountId=${window.realAccountId}&symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`
+      : `/api/public/trendbars?symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`;
+
+    const res = await fetch(endpoint, { credentials: "include" });
     if (!res.ok) throw new Error("Trendbars request failed: " + res.status);
     const data = await res.json();
     const bars = data.trendbar || [];
@@ -432,32 +421,31 @@ async function renderRealCandles(symbolName, timeframe) {
       return { open, high, low, close };
     });
 
-    drawCandles(candles, false);
+    drawCandles(candles);
   } catch (err) {
-    console.error("renderRealCandles error:", err);
-    svg.setAttribute("width", "100%");
-    svg.setAttribute("height", CHART_HEIGHT);
-    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#F0554A" font-size="13">Chart error: ${err.message}</text>`;
+    console.error("renderRealCandles error, falling back to mock:", err);
+    renderMockChart(symbolName);
   }
 }
 
 function refreshChart() {
-  if (window.realAccountId) {
-    renderRealCandles(state.activeTradeSymbol, state.timeframe);
-  } else {
-    renderMockChart(state.activeTradeSymbol);
-  }
+  renderRealCandles(state.activeTradeSymbol, state.timeframe);
 }
 
-// ---------- Live price polling (once a real account is connected) ----------
+// ---------- Live price polling — public feed by default, user's own if connected ----------
 
 async function pollLivePrices() {
-  if (!window.realAccountId) return;
   try {
-    const res = await fetch(`/api/live-prices?accountId=${window.realAccountId}`, { credentials: "include" });
+    const endpoint = window.realAccountId
+      ? `/api/live-prices?accountId=${window.realAccountId}`
+      : `/api/public/live-prices`;
+
+    const res = await fetch(endpoint, { credentials: "include" });
     if (!res.ok) return;
     const data = await res.json();
     const prices = data.prices || {};
+
+    if (Object.keys(prices).length === 0) return; // nothing yet, keep last known values
 
     Object.entries(prices).forEach(([code, spot]) => {
       const displayName = code.length === 6 ? `${code.slice(0, 3)}/${code.slice(3)}` : code;
@@ -485,39 +473,6 @@ async function pollLivePrices() {
   }
 }
 
-// ---------- Mock price engine (used until a real account connects) ----------
-
-function tickPrices() {
-  if (window.realAccountId) {
-    pollLivePrices();
-    return;
-  }
-
-  state.symbols.forEach((s) => {
-    const dp = decimalsFor(s.symbol);
-    const pipSize = dp === 3 ? 0.001 : 0.00001;
-    const moveDir = Math.random() < 0.5 ? -1 : 1;
-    const moveAmount = moveDir * pipSize * (1 + Math.floor(Math.random() * 3));
-
-    const prevBid = s.bid;
-    s.bid = Number((s.bid + moveAmount).toFixed(dp));
-    s.ask = Number((s.bid + (dp === 3 ? 0.016 : 0.00012)).toFixed(dp));
-
-    const tickerEl = document.querySelector(`.ticker-item[data-symbol="${s.symbol}"] .px`);
-    if (tickerEl) {
-      tickerEl.textContent = fmt(s.bid, dp);
-      flashPrice(tickerEl, s.bid >= prevBid ? "up" : "down");
-    }
-
-    pushChartTick(s.symbol, s.bid);
-  });
-
-  renderWatchlist();
-  renderMarkets(document.getElementById("market-search").value);
-  updateTicketPrices();
-  renderPositions();
-}
-
 // ---------- Init ----------
 
 function init() {
@@ -537,7 +492,7 @@ function init() {
     renderMarkets(e.target.value);
   });
 
-  setInterval(tickPrices, 2000);
+  setInterval(pollLivePrices, 2000);
 }
 
 document.addEventListener("DOMContentLoaded", init);
