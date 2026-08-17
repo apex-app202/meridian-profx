@@ -16,9 +16,10 @@ class CTraderClient {
     this.connection = null;
     this.appAuthenticated = false;
     this.authenticatedAccounts = new Map();
-    this.symbolCache = new Map(); // accountId -> Map(normalizedCode -> {id, rawName})
-    this.latestSpots = new Map(); // symbolId -> { bid, ask, timestamp }
+    this.symbolCache = new Map();
+    this.latestSpots = new Map();
     this.spotListenerStarted = false;
+    this.serviceAccountId = null; // the account we use to feed public market data
   }
 
   async connect() {
@@ -57,6 +58,27 @@ class CTraderClient {
       });
     });
     console.log("[ctrader] spot event listener attached");
+  }
+
+  // Uses env vars to auto-authorize one account at boot, so the app has a
+  // live public price feed even before any visitor logs in personally.
+  async authorizeServiceAccount() {
+    const accountId = process.env.CTRADER_SERVICE_ACCOUNT_ID;
+    const accessToken = process.env.CTRADER_SERVICE_ACCESS_TOKEN;
+
+    if (!accountId || !accessToken) {
+      console.log("[ctrader] no service account configured — public feed will use mock data until a user connects");
+      return;
+    }
+
+    try {
+      await this.authorizeAccount(accountId, accessToken);
+      this.serviceAccountId = accountId;
+      await this.subscribeToWatchlist(accountId);
+      console.log("[ctrader] service account authorized + subscribed:", accountId);
+    } catch (err) {
+      console.error("[ctrader] failed to authorize service account:", err.message);
+    }
   }
 
   async authorizeAccount(ctidTraderAccountId, accessToken) {
@@ -108,9 +130,6 @@ class CTraderClient {
     });
   }
 
-  // Robust matching: normalize both our target codes and the broker's real
-  // symbol names (strip dots, dashes, suffixes, case) and match on the core
-  // 6-letter code being present, rather than requiring an exact string match.
   async subscribeToWatchlist(ctidTraderAccountId) {
     const res = await this.getSymbols(ctidTraderAccountId);
     const symbols = res.symbol || [];
@@ -137,7 +156,7 @@ class CTraderClient {
       await this.subscribeSpots(ctidTraderAccountId, ids);
       console.log(`[ctrader] subscribed to ${ids.length} live symbols for account`, ctidTraderAccountId);
     } else {
-      console.warn("[ctrader] WARNING: no watchlist symbols matched — live prices will not work. Check raw names above.");
+      console.warn("[ctrader] WARNING: no watchlist symbols matched — check raw names above.");
     }
 
     this.startSpotListener();
@@ -162,6 +181,20 @@ class CTraderClient {
       if (spot) prices[code] = spot;
     }
     return prices;
+  }
+
+  // Public feed helpers — use the service account so anyone can see live
+  // data without logging in themselves.
+  getPublicLivePrices() {
+    if (!this.serviceAccountId) return {};
+    return this.getLivePrices(this.serviceAccountId);
+  }
+
+  async getPublicTrendbars(symbol, period, count) {
+    if (!this.serviceAccountId) throw new Error("No service account configured");
+    const symbolId = await this.getSymbolIdByName(this.serviceAccountId, symbol);
+    if (!symbolId) throw new Error("Symbol not found: " + symbol);
+    return this.getTrendbars(this.serviceAccountId, symbolId, period, count);
   }
 
   async getTrendbars(ctidTraderAccountId, symbolId, period = "M1", count = 100) {

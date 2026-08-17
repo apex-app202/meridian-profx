@@ -21,6 +21,29 @@ function getSession(req) {
   return userSessions.get(req.cookies.session_id);
 }
 
+// ---- Public endpoints: no login required, powered by the service account ----
+
+app.get("/api/public/live-prices", (req, res) => {
+  try {
+    const prices = ctraderClient.getPublicLivePrices();
+    res.json({ prices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/public/trendbars", async (req, res) => {
+  try {
+    const { symbol, period } = req.query;
+    const data = await ctraderClient.getPublicTrendbars(symbol, period || "M1", 100);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- Authenticated endpoints: require a logged-in user, used for trading their own account ----
+
 app.get("/api/positions", async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: "Not logged in" });
@@ -108,6 +131,7 @@ const PORT = process.env.PORT || 4000;
 
 async function start() {
   await ctraderClient.connect();
+  await ctraderClient.authorizeServiceAccount();
   app.listen(PORT, () => console.log(`Backend running on http://localhost:${PORT}`));
 }
 

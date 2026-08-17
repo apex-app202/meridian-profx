@@ -100,4 +100,17 @@ router.get("/auth/session", (req, res) => {
   res.json({ accounts: session.accounts });
 });
 
+// TEMPORARY — visit this once while logged in to grab your token for the
+// service account env vars, then it's safe to delete this route.
+router.get("/auth/my-tokens", (req, res) => {
+  const sessionId = req.cookies.session_id;
+  const session = userSessions.get(sessionId);
+  if (!session) return res.status(401).json({ error: "Not logged in" });
+  res.json({
+    accessToken: session.accessToken,
+    refreshToken: session.refreshToken,
+    accounts: session.accounts.map(a => ({ id: a.ctidTraderAccountId, login: a.traderLogin, isLive: a.isLive })),
+  });
+});
+
 module.exports = { router, userSessions };
