@@ -5,14 +5,18 @@ const HOSTS = {
   live: { host: "live.ctraderapi.com", port: 5035 },
 };
 
-const WATCHLIST_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "EURGBP"];
+const WATCHLIST_CODES = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD", "EURGBP"];
+
+function normalize(name) {
+  return name.toUpperCase().replace(/[^A-Z]/g, "");
+}
 
 class CTraderClient {
   constructor() {
     this.connection = null;
     this.appAuthenticated = false;
     this.authenticatedAccounts = new Map();
-    this.symbolCache = new Map(); // accountId -> Map(symbolName -> symbolId)
+    this.symbolCache = new Map(); // accountId -> Map(normalizedCode -> {id, rawName})
     this.latestSpots = new Map(); // symbolId -> { bid, ask, timestamp }
     this.spotListenerStarted = false;
   }
@@ -52,6 +56,7 @@ class CTraderClient {
         timestamp: Date.now(),
       });
     });
+    console.log("[ctrader] spot event listener attached");
   }
 
   async authorizeAccount(ctidTraderAccountId, accessToken) {
@@ -103,41 +108,58 @@ class CTraderClient {
     });
   }
 
-  // Fetches the account's full symbol list once, builds a name -> id map,
-  // subscribes to live spots for our default watchlist pairs.
+  // Robust matching: normalize both our target codes and the broker's real
+  // symbol names (strip dots, dashes, suffixes, case) and match on the core
+  // 6-letter code being present, rather than requiring an exact string match.
   async subscribeToWatchlist(ctidTraderAccountId) {
     const res = await this.getSymbols(ctidTraderAccountId);
     const symbols = res.symbol || [];
 
+    console.log(`[ctrader] account has ${symbols.length} symbols total. First 10 raw names:`,
+      symbols.slice(0, 10).map(s => s.symbolName));
+
     const map = new Map();
-    symbols.forEach((s) => map.set(s.symbolName.toUpperCase(), s.symbolId));
+    symbols.forEach((s) => {
+      const norm = normalize(s.symbolName);
+      const matchedCode = WATCHLIST_CODES.find((code) => norm.includes(code));
+      if (matchedCode && !map.has(matchedCode)) {
+        map.set(matchedCode, { id: s.symbolId, rawName: s.symbolName });
+      }
+    });
+
     this.symbolCache.set(String(ctidTraderAccountId), map);
 
-    const ids = WATCHLIST_SYMBOLS.map((n) => map.get(n)).filter(Boolean);
+    const ids = [...map.values()].map((v) => v.id);
+    console.log(`[ctrader] matched ${ids.length}/${WATCHLIST_CODES.length} watchlist symbols:`,
+      [...map.entries()].map(([code, v]) => `${code}->${v.rawName}(${v.id})`));
+
     if (ids.length) {
       await this.subscribeSpots(ctidTraderAccountId, ids);
-      console.log(`Subscribed to ${ids.length} live symbols for account`, ctidTraderAccountId);
+      console.log(`[ctrader] subscribed to ${ids.length} live symbols for account`, ctidTraderAccountId);
+    } else {
+      console.warn("[ctrader] WARNING: no watchlist symbols matched — live prices will not work. Check raw names above.");
     }
+
     this.startSpotListener();
     return map;
   }
 
   async getSymbolIdByName(ctidTraderAccountId, displayName) {
-    const cleanName = displayName.replace("/", "").toUpperCase();
+    const code = normalize(displayName);
     const key = String(ctidTraderAccountId);
     if (!this.symbolCache.has(key)) {
       await this.subscribeToWatchlist(ctidTraderAccountId);
     }
-    return this.symbolCache.get(key)?.get(cleanName);
+    return this.symbolCache.get(key)?.get(code)?.id;
   }
 
   getLivePrices(ctidTraderAccountId) {
     const map = this.symbolCache.get(String(ctidTraderAccountId));
     if (!map) return {};
     const prices = {};
-    for (const [name, id] of map.entries()) {
-      const spot = this.latestSpots.get(id);
-      if (spot) prices[name] = spot;
+    for (const [code, entry] of map.entries()) {
+      const spot = this.latestSpots.get(entry.id);
+      if (spot) prices[code] = spot;
     }
     return prices;
   }

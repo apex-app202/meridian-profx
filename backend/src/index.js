@@ -90,6 +90,18 @@ app.get("/api/trendbars", async (req, res) => {
   }
 });
 
+app.get("/api/debug-symbols", async (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ error: "Not logged in" });
+  try {
+    const data = await ctraderClient.getSymbols(req.query.accountId);
+    const names = (data.symbol || []).map(s => s.symbolName);
+    res.json({ count: names.length, names });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 4000;
