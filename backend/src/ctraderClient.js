@@ -27,6 +27,7 @@ class CTraderClient {
     this.serviceAccountId = null;
     this.serviceAccessToken = null;
     this.serviceRefreshToken = null;
+    this.spotEventCount = 0;
   }
 
   async connect() {
@@ -58,18 +59,19 @@ class CTraderClient {
     if (this.spotListenerStarted || !this.connection) return;
     this.spotListenerStarted = true;
     this.connection.on("ProtoOASpotEvent", (event) => {
+      this.spotEventCount++;
       this.latestSpots.set(event.symbolId, {
         bid: event.bid,
         ask: event.ask,
         timestamp: Date.now(),
       });
+      if (this.spotEventCount <= 5 || this.spotEventCount % 20 === 0) {
+        console.log(`[ctrader] spot event #${this.spotEventCount} — symbolId ${event.symbolId}, bid ${event.bid}, ask ${event.ask}`);
+      }
     });
     console.log("[ctrader] spot event listener attached");
   }
 
-  // Exchanges the long-lived refresh token for a brand new short-lived
-  // access token. cTrader access tokens expire (~1hr), so this must be
-  // called at startup and periodically re-run to stay connected.
   async refreshServiceToken() {
     const refreshToken = this.serviceRefreshToken || process.env.CTRADER_SERVICE_REFRESH_TOKEN;
     if (!refreshToken) {
@@ -93,16 +95,12 @@ class CTraderClient {
     }
 
     this.serviceAccessToken = data.access_token;
-    // cTrader may or may not rotate the refresh token itself; keep whichever we have.
     this.serviceRefreshToken = data.refresh_token || refreshToken;
 
     console.log("[ctrader] service access token refreshed successfully");
     return this.serviceAccessToken;
   }
 
-  // Authorizes the public/service account, refreshing the token first so
-  // we always start with a valid one. Also sets up a recurring refresh
-  // so the connection doesn't silently go stale after ~1 hour.
   async authorizeServiceAccount() {
     const accountId = process.env.CTRADER_SERVICE_ACCOUNT_ID;
     this.serviceRefreshToken = process.env.CTRADER_SERVICE_REFRESH_TOKEN;
@@ -119,7 +117,6 @@ class CTraderClient {
       await this.subscribeToWatchlist(accountId);
       console.log("[ctrader] service account authorized + subscribed:", accountId);
 
-      // Refresh every 40 minutes, well before the ~60 minute expiry.
       if (this.serviceRefreshInterval) clearInterval(this.serviceRefreshInterval);
       this.serviceRefreshInterval = setInterval(() => {
         this.refreshAndReauthorizeService().catch((err) => {
@@ -198,7 +195,8 @@ class CTraderClient {
       [...map.entries()].map(([code, v]) => `${code}->${v.rawName}(${v.id})`));
 
     if (ids.length) {
-      await this.subscribeSpots(ctidTraderAccountId, ids);
+      const subRes = await this.subscribeSpots(ctidTraderAccountId, ids);
+      console.log(`[ctrader] subscribeSpots response:`, JSON.stringify(subRes));
       console.log(`[ctrader] subscribed to ${ids.length} live symbols for account`, ctidTraderAccountId);
     } else {
       console.warn("[ctrader] WARNING: no watchlist symbols matched — check raw names above.");
@@ -323,6 +321,15 @@ class CTraderClient {
       ...(limitPrice ? { limitPrice } : {}),
       ...(stopPrice ? { stopPrice } : {}),
     });
+  }
+
+  getDebugInfo() {
+    return {
+      spotEventCount: this.spotEventCount,
+      latestSpotsSize: this.latestSpots.size,
+      serviceAccountId: this.serviceAccountId,
+      sampleSpots: [...this.latestSpots.entries()].slice(0, 5).map(([id, spot]) => ({ symbolId: id, ...spot })),
+    };
   }
 
   onEvent(eventName, handler) {

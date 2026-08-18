@@ -11,9 +11,6 @@ app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
-// Prevent the browser from caching any API response — live data must
-// always be freshly fetched, never replayed from cache (fixes stale
-// prices showing as 304 Not Modified forever).
 app.use("/api", (req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.set("Pragma", "no-cache");
@@ -30,8 +27,6 @@ app.use(authRouter);
 function getSession(req) {
   return userSessions.get(req.cookies.session_id);
 }
-
-// ---- Public endpoints: no login required, powered by the service account ----
 
 app.get("/api/public/live-prices", (req, res) => {
   try {
@@ -52,7 +47,9 @@ app.get("/api/public/trendbars", async (req, res) => {
   }
 });
 
-// ---- Authenticated endpoints: require a logged-in user ----
+app.get("/api/debug-spots", (req, res) => {
+  res.json(ctraderClient.getDebugInfo());
+});
 
 app.get("/api/positions", async (req, res) => {
   const session = getSession(req);
