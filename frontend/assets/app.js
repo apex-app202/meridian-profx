@@ -1,9 +1,10 @@
-// ===== Meridian ProFX — app logic =====
+// ===== Meridian ProFX — app logic (real data only, no mock) =====
+
+const WATCHLIST_NAMES = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"];
 
 const state = {
-  symbols: JSON.parse(JSON.stringify(MOCK_SYMBOLS)),
-  positions: JSON.parse(JSON.stringify(MOCK_POSITIONS)),
-  history: MOCK_HISTORY,
+  symbols: WATCHLIST_NAMES.map((name) => ({ symbol: name, bid: null, ask: null, prevBid: null })),
+  positions: [],
   activeTradeSymbol: "EUR/USD",
   orderType: "MARKET",
   timeframe: "M1",
@@ -13,8 +14,8 @@ const CANDLE_WIDTH = 10;
 const CANDLE_GAP = 4;
 const CHART_HEIGHT = 320;
 
-const fmt = (n, dp = 5) => Number(n).toFixed(dp);
-const fmtMoney = (n) => (n >= 0 ? "+" : "") + Number(n).toFixed(2);
+const fmt = (n, dp = 5) => (n === null || n === undefined ? "—" : Number(n).toFixed(dp));
+const fmtMoney = (n) => (n === null || n === undefined ? "—" : (n >= 0 ? "+" : "") + Number(n).toFixed(2));
 
 function getSymbol(name) {
   return state.symbols.find((s) => s.symbol === name);
@@ -72,14 +73,19 @@ function renderWatchlist() {
   tbody.innerHTML = state.symbols
     .map((s) => {
       const dp = decimalsFor(s.symbol);
-      const chgClass = s.changePct >= 0 ? "pos" : "neg";
-      const chgSign = s.changePct >= 0 ? "+" : "";
+      let chgHtml = `<span class="muted">—</span>`;
+      if (s.bid !== null && s.openBid) {
+        const chgPct = ((s.bid - s.openBid) / s.openBid) * 100;
+        const chgClass = chgPct >= 0 ? "pos" : "neg";
+        const chgSign = chgPct >= 0 ? "+" : "";
+        chgHtml = `<span class="mono ${chgClass}">${chgSign}${chgPct.toFixed(2)}%</span>`;
+      }
       return `
         <tr>
           <td>${s.symbol}</td>
           <td class="mono">${fmt(s.bid, dp)}</td>
           <td class="mono">${fmt(s.ask, dp)}</td>
-          <td class="mono ${chgClass}">${chgSign}${s.changePct.toFixed(2)}%</td>
+          <td>${chgHtml}</td>
         </tr>`;
     })
     .join("");
@@ -95,16 +101,23 @@ function renderMarkets(filter = "") {
   tbody.innerHTML = rows
     .map((s) => {
       const dp = decimalsFor(s.symbol);
-      const spread = ((s.ask - s.bid) * (s.symbol.includes("JPY") ? 100 : 10000)).toFixed(1);
-      const chgClass = s.changePct >= 0 ? "pos" : "neg";
-      const chgSign = s.changePct >= 0 ? "+" : "";
+      const spread = s.bid !== null
+        ? ((s.ask - s.bid) * (s.symbol.includes("JPY") ? 100 : 10000)).toFixed(1)
+        : "—";
+      let chgHtml = `<span class="muted">—</span>`;
+      if (s.bid !== null && s.openBid) {
+        const chgPct = ((s.bid - s.openBid) / s.openBid) * 100;
+        const chgClass = chgPct >= 0 ? "pos" : "neg";
+        const chgSign = chgPct >= 0 ? "+" : "";
+        chgHtml = `<span class="mono ${chgClass}">${chgSign}${chgPct.toFixed(2)}%</span>`;
+      }
       return `
         <tr>
           <td>${s.symbol}</td>
           <td class="mono">${fmt(s.bid, dp)}</td>
           <td class="mono">${fmt(s.ask, dp)}</td>
           <td class="mono muted">${spread}</td>
-          <td class="mono ${chgClass}">${chgSign}${s.changePct.toFixed(2)}%</td>
+          <td>${chgHtml}</td>
           <td><button class="row-btn" data-goto-trade="${s.symbol}">Trade</button></td>
         </tr>`;
     })
@@ -118,17 +131,7 @@ function renderMarkets(filter = "") {
   });
 }
 
-// ---------- Positions ----------
-
-function calcPL(pos) {
-  const sym = getSymbol(pos.symbol);
-  if (!sym) return 0;
-  const current = pos.side === "BUY" ? sym.bid : sym.ask;
-  const diff = pos.side === "BUY" ? current - pos.openPrice : pos.openPrice - current;
-  const pipFactor = pos.symbol.includes("JPY") ? 100 : 10000;
-  const pips = diff * pipFactor;
-  return pips * pos.volume * 10;
-}
+// ---------- Positions (real account only) ----------
 
 function renderPositions() {
   const tbody = document.querySelector("#positions-table tbody");
@@ -140,14 +143,14 @@ function renderPositions() {
   badge.textContent = state.positions.length;
   dashCount.textContent = state.positions.length;
   empty.style.display = state.positions.length ? "none" : "block";
+  empty.textContent = window.realAccountId
+    ? "No open positions on this account right now."
+    : "Connect your cTrader account (Account tab) to see your open positions here.";
 
   tbody.innerHTML = state.positions
     .map((pos) => {
-      const sym = getSymbol(pos.symbol);
       const dp = decimalsFor(pos.symbol);
-      const current = sym ? (pos.side === "BUY" ? sym.bid : sym.ask) : pos.openPrice;
-      const pl = calcPL(pos);
-      const plClass = pl >= 0 ? "pos" : "neg";
+      const plClass = pos.pl >= 0 ? "pos" : "neg";
       const sideClass = pos.side === "BUY" ? "side-buy" : "side-sell";
       return `
         <tr>
@@ -155,52 +158,45 @@ function renderPositions() {
           <td class="${sideClass}">${pos.side}</td>
           <td class="mono">${pos.volume.toFixed(2)}</td>
           <td class="mono">${fmt(pos.openPrice, dp)}</td>
-          <td class="mono">${fmt(current, dp)}</td>
+          <td class="mono">${fmt(pos.currentPrice, dp)}</td>
           <td class="mono muted">${pos.sl ? fmt(pos.sl, dp) : "—"}</td>
           <td class="mono muted">${pos.tp ? fmt(pos.tp, dp) : "—"}</td>
-          <td class="mono ${plClass}">${fmtMoney(pl)}</td>
-          <td><button class="close-btn" data-close="${pos.id}">Close</button></td>
+          <td class="mono ${plClass}">${fmtMoney(pos.pl)}</td>
+          <td><span class="muted" style="font-size:11px;">via cTrader</span></td>
         </tr>`;
     })
     .join("");
 
   dashTbody.innerHTML = state.positions
     .map((pos) => {
-      const pl = calcPL(pos);
-      const plClass = pl >= 0 ? "pos" : "neg";
+      const plClass = pos.pl >= 0 ? "pos" : "neg";
       const sideClass = pos.side === "BUY" ? "side-buy" : "side-sell";
       return `
         <tr>
           <td>${pos.symbol}</td>
           <td class="${sideClass}">${pos.side}</td>
           <td class="mono">${pos.volume.toFixed(2)}</td>
-          <td class="mono ${plClass}">${fmtMoney(pl)}</td>
+          <td class="mono ${plClass}">${fmtMoney(pos.pl)}</td>
         </tr>`;
     })
     .join("");
-
-  tbody.querySelectorAll("[data-close]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.positions = state.positions.filter((p) => p.id !== btn.dataset.close);
-      renderPositions();
-      renderSummary();
-    });
-  });
 
   renderSummary();
 }
 
 function renderSummary() {
-  const totalPL = state.positions.reduce((sum, p) => sum + calcPL(p), 0);
-  const balance = 10000;
-  const equity = balance + totalPL;
+  const totalPL = state.positions.reduce((sum, p) => sum + (p.pl || 0), 0);
 
-  document.getElementById("stat-balance").textContent = balance.toFixed(2);
-  document.getElementById("stat-equity").textContent = equity.toFixed(2);
-  document.getElementById("stat-margin").textContent = (state.positions.length * 104.13).toFixed(2);
+  if (!window.realAccountId) {
+    document.getElementById("stat-balance").textContent = "—";
+    document.getElementById("stat-equity").textContent = "—";
+    document.getElementById("stat-margin").textContent = "—";
+    document.getElementById("stat-pl").textContent = "—";
+    return;
+  }
 
+  document.getElementById("stat-pl").textContent = fmtMoney(totalPL);
   const plEl = document.getElementById("stat-pl");
-  plEl.textContent = fmtMoney(totalPL);
   plEl.classList.toggle("pos", totalPL >= 0);
   plEl.classList.toggle("neg", totalPL < 0);
 }
@@ -209,23 +205,9 @@ function renderSummary() {
 
 function renderHistory() {
   const tbody = document.querySelector("#history-table tbody");
-  tbody.innerHTML = state.history
-    .map((h) => {
-      const dp = h.symbol.includes("JPY") ? 3 : 5;
-      const plClass = h.pl >= 0 ? "pos" : "neg";
-      const sideClass = h.side === "BUY" ? "side-buy" : "side-sell";
-      return `
-        <tr>
-          <td class="mono muted">${h.date}</td>
-          <td>${h.symbol}</td>
-          <td class="${sideClass}">${h.side}</td>
-          <td class="mono">${h.volume.toFixed(2)}</td>
-          <td class="mono">${fmt(h.open, dp)}</td>
-          <td class="mono">${fmt(h.close, dp)}</td>
-          <td class="mono ${plClass}">${fmtMoney(h.pl)}</td>
-        </tr>`;
-    })
-    .join("");
+  const empty = document.getElementById("history-empty");
+  tbody.innerHTML = "";
+  empty.style.display = "block";
 }
 
 // ---------- Trade ticket ----------
@@ -289,38 +271,56 @@ function initOrderButtons() {
   document.getElementById("ticket-sell-box").addEventListener("click", () => submitOrder("SELL"));
 }
 
-function submitOrder(side) {
-  const sym = getSymbol(state.activeTradeSymbol);
-  const volume = parseFloat(document.getElementById("ticket-volume").value) || 0.1;
-  const sl = parseFloat(document.getElementById("ticket-sl").value) || null;
-  const tp = parseFloat(document.getElementById("ticket-tp").value) || null;
-
-  if (!sym) return;
-
-  const openPrice = side === "BUY" ? sym.ask : sym.bid;
-
-  state.positions.push({
-    id: "p" + Date.now(),
-    symbol: sym.symbol,
-    side,
-    volume,
-    openPrice,
-    sl,
-    tp,
-  });
-
-  renderPositions();
-
+async function submitOrder(side) {
   const note = document.getElementById("ticket-note");
-  note.textContent = `Mock ${side} order filled — ${volume} lots ${sym.symbol} @ ${fmt(openPrice, decimalsFor(sym.symbol))}. This is demo mode, no live order was sent.`;
-  note.classList.add(side === "BUY" ? "pos" : "neg");
+
+  if (!window.realAccountId) {
+    note.textContent = "Connect your cTrader account (Account tab) before placing orders.";
+    note.classList.add("neg");
+    setTimeout(() => note.classList.remove("neg"), 3000);
+    return;
+  }
+
+  const volume = parseFloat(document.getElementById("ticket-volume").value) || 0.1;
+
+  note.textContent = `Sending ${side} order...`;
+
+  try {
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ctidTraderAccountId: window.realAccountId,
+        symbol: state.activeTradeSymbol,
+        side,
+        orderType: state.orderType,
+        volume,
+      }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      note.textContent = "Order failed: " + (errData.error || res.status);
+      note.classList.add("neg");
+      return;
+    }
+
+    note.textContent = `${side} order sent for ${volume} lots ${state.activeTradeSymbol}.`;
+    note.classList.add(side === "BUY" ? "pos" : "neg");
+    pollPositions();
+  } catch (err) {
+    note.textContent = "Error: " + err.message;
+    note.classList.add("neg");
+  }
+
   setTimeout(() => {
-    note.textContent = "Demo mode — no live order will be sent.";
+    note.textContent = "Connected — orders placed here go to your real account.";
     note.classList.remove("pos", "neg");
-  }, 3000);
+  }, 4000);
 }
 
-// ---------- Chart: shared candle-drawing helper ----------
+// ---------- Chart: candle drawing ----------
 
 function drawCandles(candles) {
   const svg = document.getElementById("chart-svg");
@@ -329,7 +329,7 @@ function drawCandles(candles) {
   if (!candles.length) {
     svg.setAttribute("width", "100%");
     svg.setAttribute("height", CHART_HEIGHT);
-    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#7C8494" font-size="13">No chart data available.</text>`;
+    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#7C8494" font-size="13">No chart data available yet.</text>`;
     return;
   }
 
@@ -370,32 +370,11 @@ function drawCandles(candles) {
   }
 }
 
-// ---------- Chart: mock (random walk) — only used if the public feed itself fails ----------
-
-let chartHistory = {};
-
-function renderMockChart(symbolName) {
-  if (!chartHistory[symbolName]) {
-    const sym = getSymbol(symbolName);
-    const points = [];
-    let price = sym.bid;
-    for (let i = 0; i < 80; i++) {
-      const open = price;
-      price += (Math.random() - 0.5) * price * 0.0006;
-      const close = price;
-      const high = Math.max(open, close) + Math.random() * price * 0.0002;
-      const low = Math.min(open, close) - Math.random() * price * 0.0002;
-      points.push({ open, high, low, close });
-    }
-    chartHistory[symbolName] = points;
-  }
-  drawCandles(chartHistory[symbolName]);
-}
-
-// ---------- Chart: real candlesticks (public feed by default, or user's own account if connected) ----------
-
-async function renderRealCandles(symbolName, timeframe) {
+async function refreshChart() {
   const svg = document.getElementById("chart-svg");
+  const symbolName = state.activeTradeSymbol;
+  const timeframe = state.timeframe;
+
   try {
     const endpoint = window.realAccountId
       ? `/api/trendbars?accountId=${window.realAccountId}&symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`
@@ -405,6 +384,7 @@ async function renderRealCandles(symbolName, timeframe) {
     if (!res.ok) throw new Error("Trendbars request failed: " + res.status);
     const data = await res.json();
     const bars = data.trendbar || [];
+
     if (!bars.length) {
       svg.setAttribute("width", "100%");
       svg.setAttribute("height", CHART_HEIGHT);
@@ -423,16 +403,14 @@ async function renderRealCandles(symbolName, timeframe) {
 
     drawCandles(candles);
   } catch (err) {
-    console.error("renderRealCandles error, falling back to mock:", err);
-    renderMockChart(symbolName);
+    console.error("refreshChart error:", err);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", CHART_HEIGHT);
+    svg.innerHTML = `<text x="20" y="${CHART_HEIGHT / 2}" fill="#F0554A" font-size="13">Chart error: ${err.message}</text>`;
   }
 }
 
-function refreshChart() {
-  renderRealCandles(state.activeTradeSymbol, state.timeframe);
-}
-
-// ---------- Live price polling — public feed by default, user's own if connected ----------
+// ---------- Live price polling (public feed by default, user's own if connected) ----------
 
 async function pollLivePrices() {
   try {
@@ -445,7 +423,7 @@ async function pollLivePrices() {
     const data = await res.json();
     const prices = data.prices || {};
 
-    if (Object.keys(prices).length === 0) return; // nothing yet, keep last known values
+    if (Object.keys(prices).length === 0) return;
 
     Object.entries(prices).forEach(([code, spot]) => {
       const displayName = code.length === 6 ? `${code.slice(0, 3)}/${code.slice(3)}` : code;
@@ -453,23 +431,46 @@ async function pollLivePrices() {
       if (!sym) return;
       const dp = decimalsFor(displayName);
       const divisor = displayName.includes("JPY") ? 1000 : 100000;
+
       const prevBid = sym.bid;
       sym.bid = Number((spot.bid / divisor).toFixed(dp));
       sym.ask = Number((spot.ask / divisor).toFixed(dp));
+      if (sym.openBid === undefined || sym.openBid === null) sym.openBid = sym.bid;
 
       const tickerEl = document.querySelector(`.ticker-item[data-symbol="${displayName}"] .px`);
-      if (tickerEl) {
+      if (tickerEl && prevBid !== null) {
         tickerEl.textContent = fmt(sym.bid, dp);
         flashPrice(tickerEl, sym.bid >= prevBid ? "up" : "down");
+      } else if (tickerEl) {
+        tickerEl.textContent = fmt(sym.bid, dp);
       }
     });
 
     renderWatchlist();
     renderMarkets(document.getElementById("market-search").value);
     updateTicketPrices();
-    renderPositions();
   } catch (err) {
     console.error("pollLivePrices error:", err);
+  }
+}
+
+// ---------- Positions polling (real account only) ----------
+
+async function pollPositions() {
+  if (!window.realAccountId) {
+    state.positions = [];
+    renderPositions();
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/positions?accountId=${window.realAccountId}`, { credentials: "include" });
+    if (!res.ok) return;
+    const data = await res.json();
+    state.positions = data.positions || [];
+    renderPositions();
+  } catch (err) {
+    console.error("pollPositions error:", err);
   }
 }
 
@@ -492,7 +493,9 @@ function init() {
     renderMarkets(e.target.value);
   });
 
+  pollLivePrices();
   setInterval(pollLivePrices, 2000);
+  setInterval(pollPositions, 5000);
 }
 
 document.addEventListener("DOMContentLoaded", init);

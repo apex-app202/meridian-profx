@@ -42,14 +42,14 @@ app.get("/api/public/trendbars", async (req, res) => {
   }
 });
 
-// ---- Authenticated endpoints: require a logged-in user, used for trading their own account ----
+// ---- Authenticated endpoints: require a logged-in user ----
 
 app.get("/api/positions", async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: "Not logged in" });
   try {
-    const data = await ctraderClient.getPositions(req.query.accountId);
-    res.json(data);
+    const positions = await ctraderClient.getFormattedPositions(req.query.accountId);
+    res.json({ positions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -59,7 +59,16 @@ app.post("/api/orders", async (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ error: "Not logged in" });
   try {
-    const result = await ctraderClient.placeOrder(req.body);
+    const { ctidTraderAccountId, symbol, side, orderType, volume, limitPrice, stopPrice } = req.body;
+    const result = await ctraderClient.placeOrderByName({
+      ctidTraderAccountId,
+      symbol,
+      side,
+      orderType,
+      volume,
+      limitPrice,
+      stopPrice,
+    });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

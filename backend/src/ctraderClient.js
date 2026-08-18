@@ -11,15 +11,20 @@ function normalize(name) {
   return name.toUpperCase().replace(/[^A-Z]/g, "");
 }
 
+function toDisplayName(code) {
+  return code.length === 6 ? `${code.slice(0, 3)}/${code.slice(3)}` : code;
+}
+
 class CTraderClient {
   constructor() {
     this.connection = null;
     this.appAuthenticated = false;
     this.authenticatedAccounts = new Map();
-    this.symbolCache = new Map();
-    this.latestSpots = new Map();
+    this.symbolCache = new Map();   // accountId -> Map(code -> {id, rawName})
+    this.reverseCache = new Map();  // accountId -> Map(symbolId -> code)
+    this.latestSpots = new Map();   // symbolId -> { bid, ask, timestamp }
     this.spotListenerStarted = false;
-    this.serviceAccountId = null; // the account we use to feed public market data
+    this.serviceAccountId = null;
   }
 
   async connect() {
@@ -60,14 +65,12 @@ class CTraderClient {
     console.log("[ctrader] spot event listener attached");
   }
 
-  // Uses env vars to auto-authorize one account at boot, so the app has a
-  // live public price feed even before any visitor logs in personally.
   async authorizeServiceAccount() {
     const accountId = process.env.CTRADER_SERVICE_ACCOUNT_ID;
     const accessToken = process.env.CTRADER_SERVICE_ACCESS_TOKEN;
 
     if (!accountId || !accessToken) {
-      console.log("[ctrader] no service account configured — public feed will use mock data until a user connects");
+      console.log("[ctrader] no service account configured — public feed will be empty until a user connects");
       return;
     }
 
@@ -103,24 +106,8 @@ class CTraderClient {
     return this.requireConnection().sendCommand("ProtoOATraderReq", { ctidTraderAccountId });
   }
 
-  async getPositions(ctidTraderAccountId) {
-    return this.requireConnection().sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId });
-  }
-
   async getSymbols(ctidTraderAccountId) {
     return this.requireConnection().sendCommand("ProtoOASymbolsListReq", { ctidTraderAccountId });
-  }
-
-  async placeOrder({ ctidTraderAccountId, symbolId, side, orderType, volume, limitPrice, stopPrice }) {
-    return this.requireConnection().sendCommand("ProtoOANewOrderReq", {
-      ctidTraderAccountId,
-      symbolId,
-      orderType,
-      tradeSide: side,
-      volume,
-      ...(limitPrice ? { limitPrice } : {}),
-      ...(stopPrice ? { stopPrice } : {}),
-    });
   }
 
   async subscribeSpots(ctidTraderAccountId, symbolIds) {
@@ -138,15 +125,19 @@ class CTraderClient {
       symbols.slice(0, 10).map(s => s.symbolName));
 
     const map = new Map();
+    const reverseMap = new Map();
     symbols.forEach((s) => {
       const norm = normalize(s.symbolName);
       const matchedCode = WATCHLIST_CODES.find((code) => norm.includes(code));
       if (matchedCode && !map.has(matchedCode)) {
         map.set(matchedCode, { id: s.symbolId, rawName: s.symbolName });
+        reverseMap.set(s.symbolId, matchedCode);
       }
     });
 
-    this.symbolCache.set(String(ctidTraderAccountId), map);
+    const key = String(ctidTraderAccountId);
+    this.symbolCache.set(key, map);
+    this.reverseCache.set(key, reverseMap);
 
     const ids = [...map.values()].map((v) => v.id);
     console.log(`[ctrader] matched ${ids.length}/${WATCHLIST_CODES.length} watchlist symbols:`,
@@ -172,6 +163,11 @@ class CTraderClient {
     return this.symbolCache.get(key)?.get(code)?.id;
   }
 
+  getSymbolCodeById(ctidTraderAccountId, symbolId) {
+    const key = String(ctidTraderAccountId);
+    return this.reverseCache.get(key)?.get(symbolId);
+  }
+
   getLivePrices(ctidTraderAccountId) {
     const map = this.symbolCache.get(String(ctidTraderAccountId));
     if (!map) return {};
@@ -183,8 +179,6 @@ class CTraderClient {
     return prices;
   }
 
-  // Public feed helpers — use the service account so anyone can see live
-  // data without logging in themselves.
   getPublicLivePrices() {
     if (!this.serviceAccountId) return {};
     return this.getLivePrices(this.serviceAccountId);
@@ -211,6 +205,73 @@ class CTraderClient {
       fromTimestamp,
       toTimestamp: now,
       symbolId,
+    });
+  }
+
+  // Raw reconcile call (kept for debugging/advanced use)
+  async getPositionsRaw(ctidTraderAccountId) {
+    return this.requireConnection().sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId });
+  }
+
+  // Cleaned-up positions with display symbol names, ready for the frontend.
+  async getFormattedPositions(ctidTraderAccountId) {
+    const key = String(ctidTraderAccountId);
+    if (!this.symbolCache.has(key)) {
+      await this.subscribeToWatchlist(ctidTraderAccountId);
+    }
+
+    const raw = await this.getPositionsRaw(ctidTraderAccountId);
+    const rawPositions = raw.position || [];
+
+    const divisorFor = (code) => (code.includes("JPY") ? 1000 : 100000);
+
+    return rawPositions.map((p) => {
+      const code = this.getSymbolCodeById(ctidTraderAccountId, p.tradeData.symbolId) || `SYM${p.tradeData.symbolId}`;
+      const displayName = toDisplayName(code);
+      const divisor = divisorFor(code);
+
+      const spot = this.latestSpots.get(p.tradeData.symbolId);
+      const side = p.tradeData.tradeSide === "BUY" ? "BUY" : "SELL";
+      const currentRaw = spot ? (side === "BUY" ? spot.bid : spot.ask) : null;
+      const openPrice = p.price;
+      const currentPrice = currentRaw !== null ? currentRaw / divisor : openPrice;
+
+      const pipFactor = code.includes("JPY") ? 100 : 10000;
+      const diff = side === "BUY" ? currentPrice - openPrice : openPrice - currentPrice;
+      const pips = diff * pipFactor;
+      const volumeLots = p.tradeData.volume / 100000;
+      const pl = pips * volumeLots * 10;
+
+      return {
+        positionId: p.positionId,
+        symbol: displayName,
+        side,
+        volume: volumeLots,
+        openPrice,
+        currentPrice,
+        sl: p.stopLoss || null,
+        tp: p.takeProfit || null,
+        pl,
+      };
+    });
+  }
+
+  // Places an order using a display symbol name (e.g. "EUR/USD") — resolves
+  // the broker's real symbolId internally so the frontend never has to know it.
+  async placeOrderByName({ ctidTraderAccountId, symbol, side, orderType, volume, limitPrice, stopPrice }) {
+    const symbolId = await this.getSymbolIdByName(ctidTraderAccountId, symbol);
+    if (!symbolId) throw new Error("Symbol not found: " + symbol);
+
+    const volumeInUnits = Math.round(volume * 100000);
+
+    return this.requireConnection().sendCommand("ProtoOANewOrderReq", {
+      ctidTraderAccountId,
+      symbolId,
+      orderType,
+      tradeSide: side,
+      volume: volumeInUnits,
+      ...(limitPrice ? { limitPrice } : {}),
+      ...(stopPrice ? { stopPrice } : {}),
     });
   }
 
