@@ -20,11 +20,13 @@ class CTraderClient {
     this.connection = null;
     this.appAuthenticated = false;
     this.authenticatedAccounts = new Map();
-    this.symbolCache = new Map();   // accountId -> Map(code -> {id, rawName})
-    this.reverseCache = new Map();  // accountId -> Map(symbolId -> code)
-    this.latestSpots = new Map();   // symbolId -> { bid, ask, timestamp }
+    this.symbolCache = new Map();
+    this.reverseCache = new Map();
+    this.latestSpots = new Map();
     this.spotListenerStarted = false;
     this.serviceAccountId = null;
+    this.serviceAccessToken = null;
+    this.serviceRefreshToken = null;
   }
 
   async connect() {
@@ -65,23 +67,75 @@ class CTraderClient {
     console.log("[ctrader] spot event listener attached");
   }
 
+  // Exchanges the long-lived refresh token for a brand new short-lived
+  // access token. cTrader access tokens expire (~1hr), so this must be
+  // called at startup and periodically re-run to stay connected.
+  async refreshServiceToken() {
+    const refreshToken = this.serviceRefreshToken || process.env.CTRADER_SERVICE_REFRESH_TOKEN;
+    if (!refreshToken) {
+      throw new Error("No refresh token available (CTRADER_SERVICE_REFRESH_TOKEN not set)");
+    }
+
+    const res = await fetch("https://connect.spotware.com/apps/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: process.env.CTRADER_CLIENT_ID,
+        client_secret: process.env.CTRADER_CLIENT_SECRET,
+      }),
+    });
+
+    const data = await res.json();
+    if (!data.access_token) {
+      throw new Error("Token refresh failed: " + JSON.stringify(data));
+    }
+
+    this.serviceAccessToken = data.access_token;
+    // cTrader may or may not rotate the refresh token itself; keep whichever we have.
+    this.serviceRefreshToken = data.refresh_token || refreshToken;
+
+    console.log("[ctrader] service access token refreshed successfully");
+    return this.serviceAccessToken;
+  }
+
+  // Authorizes the public/service account, refreshing the token first so
+  // we always start with a valid one. Also sets up a recurring refresh
+  // so the connection doesn't silently go stale after ~1 hour.
   async authorizeServiceAccount() {
     const accountId = process.env.CTRADER_SERVICE_ACCOUNT_ID;
-    const accessToken = process.env.CTRADER_SERVICE_ACCESS_TOKEN;
+    this.serviceRefreshToken = process.env.CTRADER_SERVICE_REFRESH_TOKEN;
 
-    if (!accountId || !accessToken) {
+    if (!accountId || !this.serviceRefreshToken) {
       console.log("[ctrader] no service account configured — public feed will be empty until a user connects");
       return;
     }
 
     try {
-      await this.authorizeAccount(accountId, accessToken);
+      await this.refreshServiceToken();
+      await this.authorizeAccount(accountId, this.serviceAccessToken);
       this.serviceAccountId = accountId;
       await this.subscribeToWatchlist(accountId);
       console.log("[ctrader] service account authorized + subscribed:", accountId);
+
+      // Refresh every 40 minutes, well before the ~60 minute expiry.
+      if (this.serviceRefreshInterval) clearInterval(this.serviceRefreshInterval);
+      this.serviceRefreshInterval = setInterval(() => {
+        this.refreshAndReauthorizeService().catch((err) => {
+          console.error("[ctrader] scheduled token refresh failed:", err.message);
+        });
+      }, 40 * 60 * 1000);
     } catch (err) {
       console.error("[ctrader] failed to authorize service account:", err.message);
     }
+  }
+
+  async refreshAndReauthorizeService() {
+    console.log("[ctrader] refreshing service account token...");
+    await this.refreshServiceToken();
+    await this.authorizeAccount(this.serviceAccountId, this.serviceAccessToken);
+    console.log("[ctrader] service account re-authorized with fresh token");
   }
 
   async authorizeAccount(ctidTraderAccountId, accessToken) {
@@ -208,12 +262,10 @@ class CTraderClient {
     });
   }
 
-  // Raw reconcile call (kept for debugging/advanced use)
   async getPositionsRaw(ctidTraderAccountId) {
     return this.requireConnection().sendCommand("ProtoOAReconcileReq", { ctidTraderAccountId });
   }
 
-  // Cleaned-up positions with display symbol names, ready for the frontend.
   async getFormattedPositions(ctidTraderAccountId) {
     const key = String(ctidTraderAccountId);
     if (!this.symbolCache.has(key)) {
@@ -256,8 +308,6 @@ class CTraderClient {
     });
   }
 
-  // Places an order using a display symbol name (e.g. "EUR/USD") — resolves
-  // the broker's real symbolId internally so the frontend never has to know it.
   async placeOrderByName({ ctidTraderAccountId, symbol, side, orderType, volume, limitPrice, stopPrice }) {
     const symbolId = await this.getSymbolIdByName(ctidTraderAccountId, symbol);
     if (!symbolId) throw new Error("Symbol not found: " + symbol);
