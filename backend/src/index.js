@@ -11,6 +11,16 @@ app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
+// Prevent the browser from caching any API response — live data must
+// always be freshly fetched, never replayed from cache (fixes stale
+// prices showing as 304 Not Modified forever).
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  next();
+});
+
 const frontendPath = path.join(__dirname, "../../frontend");
 console.log("Looking for frontend at:", frontendPath);
 app.use(express.static(frontendPath));
