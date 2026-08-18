@@ -3,7 +3,7 @@
 const WATCHLIST_NAMES = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP"];
 
 const state = {
-  symbols: WATCHLIST_NAMES.map((name) => ({ symbol: name, bid: null, ask: null, prevBid: null })),
+  symbols: WATCHLIST_NAMES.map((name) => ({ symbol: name, bid: null, ask: null, openBid: null })),
   positions: [],
   activeTradeSymbol: "EUR/USD",
   orderType: "MARKET",
@@ -370,17 +370,18 @@ function drawCandles(candles) {
   }
 }
 
+// Charts are pure market data, so they always come from the public feed
+// regardless of whether a user is logged in.
 async function refreshChart() {
   const svg = document.getElementById("chart-svg");
   const symbolName = state.activeTradeSymbol;
   const timeframe = state.timeframe;
 
   try {
-    const endpoint = window.realAccountId
-      ? `/api/trendbars?accountId=${window.realAccountId}&symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`
-      : `/api/public/trendbars?symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`;
-
-    const res = await fetch(endpoint, { credentials: "include" });
+    const res = await fetch(
+      `/api/public/trendbars?symbol=${encodeURIComponent(symbolName)}&period=${timeframe}`,
+      { credentials: "include" }
+    );
     if (!res.ok) throw new Error("Trendbars request failed: " + res.status);
     const data = await res.json();
     const bars = data.trendbar || [];
@@ -410,15 +411,11 @@ async function refreshChart() {
   }
 }
 
-// ---------- Live price polling (public feed by default, user's own if connected) ----------
-
+// Prices are pure market data too — always pull from the public feed,
+// regardless of login state. Login only matters for positions/orders.
 async function pollLivePrices() {
   try {
-    const endpoint = window.realAccountId
-      ? `/api/live-prices?accountId=${window.realAccountId}`
-      : `/api/public/live-prices`;
-
-    const res = await fetch(endpoint, { credentials: "include" });
+    const res = await fetch(`/api/public/live-prices`, { credentials: "include" });
     if (!res.ok) return;
     const data = await res.json();
     const prices = data.prices || {};
@@ -435,14 +432,12 @@ async function pollLivePrices() {
       const prevBid = sym.bid;
       sym.bid = Number((spot.bid / divisor).toFixed(dp));
       sym.ask = Number((spot.ask / divisor).toFixed(dp));
-      if (sym.openBid === undefined || sym.openBid === null) sym.openBid = sym.bid;
+      if (sym.openBid === null) sym.openBid = sym.bid;
 
       const tickerEl = document.querySelector(`.ticker-item[data-symbol="${displayName}"] .px`);
-      if (tickerEl && prevBid !== null) {
+      if (tickerEl) {
         tickerEl.textContent = fmt(sym.bid, dp);
-        flashPrice(tickerEl, sym.bid >= prevBid ? "up" : "down");
-      } else if (tickerEl) {
-        tickerEl.textContent = fmt(sym.bid, dp);
+        if (prevBid !== null) flashPrice(tickerEl, sym.bid >= prevBid ? "up" : "down");
       }
     });
 
